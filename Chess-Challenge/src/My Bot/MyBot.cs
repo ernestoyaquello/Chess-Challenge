@@ -1,4 +1,5 @@
 ﻿using ChessChallenge.API;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -103,14 +104,14 @@ public class MyBot : IChessBot
         },
     };
 
-    private class ScoredMove
+    private struct ScoredMove
     {
         public ScoredMove(Move move, bool isWhite, double potentialScore = double.MinValue) =>
           (Move, IsWhite, PotentialScore, Score) = (move, isWhite, potentialScore, double.MinValue);
 
         public Move Move { get; }
         public bool IsWhite { get; }
-        public double PotentialScore { get; }
+        public double PotentialScore { get; } // Based only on the piece positions and the captures
 
         public double Score { get; set; } // To be set later by the function CalculateBestMove
     }
@@ -119,32 +120,34 @@ public class MyBot : IChessBot
 
     private static ScoredMove CalculateBestMove(Board board, Timer timer, double previousBestMoveScore = double.MinValue, int depth = 1)
     {
-        var legalScoredMoves = GetLegalScoredMoves(board);
-        var bestMove = legalScoredMoves.Length > 0 ? legalScoredMoves[0] : new ScoredMove(Move.NullMove, board.IsWhiteToMove);
+        var scoredMoves = GetScoredMoves(board).ToArray(); // sorted from the highest potential score to the lowest to cut off branchs early
+        var bestMove = scoredMoves.Length > 0 ? scoredMoves[0] : new ScoredMove(Move.NullMove, board.IsWhiteToMove);
 
-        foreach (var candidateMove in legalScoredMoves)
+        for (var moveIndex = 0; moveIndex < scoredMoves.Length; moveIndex++)
         {
-            board.MakeMove(candidateMove.Move);
+            board.MakeMove(scoredMoves[moveIndex].Move);
 
             if (board.IsInCheckmate())
             {
-                candidateMove.Score = double.MaxValue;
+                scoredMoves[moveIndex].Score = double.MaxValue;
             }
             else
             {
+                // Change maximum depth depending on how many pieces and time there are left
+                var maxDepth = (BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) > 12)
+                    ? ((timer.MillisecondsRemaining > 20000) ? 5 : 4)
+                    : ((timer.MillisecondsRemaining > 20000) ? 6 : (timer.MillisecondsRemaining > 5000 ? 5 : 4));
+
                 // Calculate the best move for the opponent after this move, then take the inverse as our score.
-                // If we cannot go deeper, simply get an heuristic to roughly approximate the score.
-                var maxDepth = timer.MillisecondsRemaining > 25000
-                    ? 6
-                    : (timer.MillisecondsRemaining > 15000 ? 5 : 4);
-                candidateMove.Score = (depth < maxDepth)
+                // If we cannot go deeper in the search tree, simply get an heuristic to roughly approximate the score.
+                scoredMoves[moveIndex].Score = (depth < maxDepth)
                     ? -CalculateBestMove(board, timer, bestMove.Score, depth + 1).Score
-                    : CalculateHeuristicScore(board, candidateMove.IsWhite);
+                    : CalculateHeuristicScore(board, scoredMoves[moveIndex].IsWhite);
             }
 
-            board.UndoMove(candidateMove.Move);
+            board.UndoMove(scoredMoves[moveIndex].Move);
 
-            bestMove = candidateMove.Score > bestMove.Score ? candidateMove : bestMove;
+            bestMove = scoredMoves[moveIndex].Score > bestMove.Score ? scoredMoves[moveIndex] : bestMove;
 
             if (bestMove.Score == double.MaxValue || previousBestMoveScore >= -bestMove.Score)
             {
@@ -158,30 +161,33 @@ public class MyBot : IChessBot
         return bestMove;
     }
 
-
     private static double CalculateHeuristicScore(Board board, bool isWhite)
     {
-        var boardScore = 0d;
+        // To incentive aggresivity, start by skweing the score slightly favorably if the user move caused a check
+        var heuristicScore = board.IsInCheck() ? 1d : 0d;
 
-        // Simply calculate how well we are doing in terms of piece values of the player and the opponent
+        // Calculate how well we are doing in terms of piece values of the player and the opponent
         for (var index = 0; index < 64; index++)
         {
             var square = new Square(index);
-            var piece = board.GetPiece(square);
-            if (!piece.IsNull)
+            var pieceInSquare = board.GetPiece(square);
+            if (!pieceInSquare.IsNull)
             {
-                boardScore += piece.IsWhite == isWhite
-                    ? CalculatePieceScore(piece.PieceType, square, piece.IsWhite)
-                    : -CalculatePieceScore(piece.PieceType, square, piece.IsWhite);
+                heuristicScore += pieceInSquare.IsWhite == isWhite
+                    ? CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite) / 16d
+                    : -CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite) / 16d;
             }
         }
 
-        return boardScore / 16d;
+        // We are here because we cannot look any further down the search tree, so apart from looking at how good
+        // the board looks for us right now, we also need to consider how good our rival has it in terms of moves,
+        // that way we try to avoid the horizon effect.
+        return (90d * heuristicScore) - (10d * GetMovesScore(board));
     }
 
     private static double CalculatePieceScore(PieceType piece, Square position, bool isWhite)
     {
-        // Calculate the intrinsic value of the piece + its value modifier due to its current position
+        // Calculate the intrinsic value of the piece + its position value
         var verticalIndex = isWhite ? (7 - position.Rank) : position.Rank;
         var horizontalIndex = isWhite ? position.File : (7 - position.File);
         return (piece == PieceType.None || piece == PieceType.King)
@@ -189,15 +195,20 @@ public class MyBot : IChessBot
             : 100d * ((_piecePositionValues[piece][verticalIndex + 1][horizontalIndex] + _piecePositionValues[piece][0][0]) / 885d);
     }
 
-    private static ScoredMove[] GetLegalScoredMoves(Board board) => board
+    private static double GetMovesScore(Board board) => board
+        .GetLegalMoves()
+        .Select(m => CalculateMovePotentialScore(m, board.IsWhiteToMove))
+        .DefaultIfEmpty(0d)
+        .Sum() / 218d; // 218 is the theoretical maximum number of available moves for a turn in chess
+
+    private static IOrderedEnumerable<ScoredMove> GetScoredMoves(Board board) => board
         .GetLegalMoves()
         .Select(m => new ScoredMove(m, board.IsWhiteToMove, CalculateMovePotentialScore(m, board.IsWhiteToMove)))
-        .OrderByDescending(m => m.PotentialScore)
-        .ToArray();
+        .OrderByDescending(m => m.PotentialScore);
 
     private static double CalculateMovePotentialScore(Move move, bool isWhite) => (
             CalculatePieceScore((move.IsPromotion ? move.PromotionPieceType : move.MovePieceType), move.TargetSquare, isWhite)
-            - CalculatePieceScore(move.MovePieceType, move.StartSquare, isWhite) + 100d
+            - CalculatePieceScore(move.MovePieceType, move.StartSquare, isWhite)
             + CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite)
-        ) / 3d;
+        ) / 2d;
 }
