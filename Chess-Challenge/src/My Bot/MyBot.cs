@@ -164,8 +164,7 @@ public class MyBot : IChessBot
 
     private double CalculateHeuristicScore(Board board)
     {
-        // To incentive aggresivity, start by skweing the score slightly favorably if the user move caused a check
-        var heuristicScore = board.IsInCheck() ? 1d : 0d;
+        var heuristicScore = 0d;
 
         // Calculate how well we are doing in terms of piece values, both ours and the opponent's
         for (var index = 0; index < 64; index++)
@@ -180,16 +179,7 @@ public class MyBot : IChessBot
                     : -CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite) / 16d;
         }
 
-        // We are here because we cannot look any further down the search tree, so apart from looking at how good
-        // the board looks for us right now, we also need to consider how good our rival has it in terms of moves,
-        // that way we try to avoid the horizon effect.
-        var movesScore = board
-            .GetLegalMoves()
-            .Select(m => CalculateMovePotentialScore(m, board.IsWhiteToMove))
-            .DefaultIfEmpty(0d)
-            .Sum() / 218d; // 218 is the theoretical maximum number of available moves for a turn in chess
-
-        return (90d * heuristicScore) - (10d * movesScore);
+        return heuristicScore;
     }
 
     private double CalculatePieceScore(PieceType piece, Square position, bool isWhite) => (piece == PieceType.None || piece == PieceType.King)
