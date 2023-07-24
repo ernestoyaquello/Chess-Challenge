@@ -289,6 +289,9 @@ public class MyBot : IChessBot
         },
     };
 
+    // TODO Check if this takes too much memory and do something to stop it if that's the case
+    private readonly Dictionary<(int, ulong), ScoredMove> _cachedBestMoves = new();
+
     private struct ScoredMove
     {
         public ScoredMove(Move move, int potentialScore = int.MinValue) =>
@@ -299,85 +302,116 @@ public class MyBot : IChessBot
         public int GameScore { get; set; } // To be set later by the function CalculateBestMove(...)
     }
 
-    public Move Think(Board board, Timer timer) => CalculateBestMove(board, timer).Move;
+    public Move Think(Board board, Timer timer) => SearchForBestMove(board, timer).Move;
 
-    // Simple minimax algorithm to guess the best possible move
-    private ScoredMove CalculateBestMove(Board board, Timer timer, int previousBestMoveScore = int.MinValue, int depth = 1)
+    // Simple negamax algorithm to guess the best possible move
+    private ScoredMove SearchForBestMove(Board board, Timer timer, int opponentBestScoreSoFar = int.MinValue, int depth = 1, bool onlyCaptures = false)
     {
-        // Moves scored by their potential and sorted from the highest to the lowest to cut off branchs early
+        var cacheKey = (depth, board.ZobristKey);
+        if (_cachedBestMoves.ContainsKey(cacheKey))
+            return _cachedBestMoves[cacheKey];
+
         var numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
+        var isEndGame = numberOfPiecesLeft <= 12; // not ideal, but simpler to calculate and write than more complex approaches
+
+        // Moves scored by their potential and sorted from the highest to the lowest to cut off branches early
         var scoredMoves = board
-            .GetLegalMoves()
-            .Select(m => new ScoredMove(m, CalculateMovePotentialScore(m, board.IsWhiteToMove, numberOfPiecesLeft <= 12)))
+            .GetLegalMoves(onlyCaptures)
+            .Select(move => new ScoredMove(move, CalculateMovePotentialScore(move, board.IsWhiteToMove, isEndGame)))
             .OrderByDescending(m => m.PotentialScore);
 
         var bestMove = scoredMoves.FirstOrDefault(new ScoredMove(Move.NullMove));
-
+        int maxDepth;
+        var numberOfMoves = 0;
         using var scoredMovesEnumerator = scoredMoves.GetEnumerator();
+
         while (scoredMovesEnumerator.MoveNext())
         {
             var candidateMove = scoredMovesEnumerator.Current;
             board.MakeMove(candidateMove.Move);
+            numberOfMoves++;
 
             if (board.IsInCheckmate())
                 candidateMove.GameScore = int.MaxValue;
+            else if (board.IsDraw())
+                candidateMove.GameScore = 0;
             else
             {
                 // Change maximum depth depending on how much time we have and how many pieces there are left
                 numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
-                var maxDepth = numberOfPiecesLeft <= 12 || timer.MillisecondsRemaining > 20000
-                    ? (numberOfPiecesLeft <= 5 ? 7 : 6)
-                    : (timer.MillisecondsRemaining > 5000 || numberOfPiecesLeft <= 5 ? 5 : 4);
+                maxDepth = numberOfPiecesLeft <= 5 ? 7 : 6;
+                if (timer.MillisecondsRemaining < 20000)
+                    maxDepth -= timer.MillisecondsRemaining < 5000 ? 2 : 1;
 
-                // Calculate the best move for the opponent after our move, then take the inverse as our score.
-                // If we cannot go deeper in the search tree, then we calculate the score using heuristics.
-                candidateMove.GameScore = (depth < maxDepth)
-                    ? -CalculateBestMove(board, timer, bestMove.GameScore, depth + 1).GameScore
-                    : CalculateHeuristicScore(board, numberOfPiecesLeft);
+                // Reduce the maximum depth for candidate moves that didn't score high enough
+                if (maxDepth > 4 && numberOfMoves > 9)
+                    maxDepth--;
+
+                // Search for the best move for the opponent after our candidate move, then take the inverse as our score (we take the L here).
+                // If we cannot go deeper in the search tree because we have reached the maximum depth, then we calculate the score using heuristics.
+                // (To try to avoid the horizon effect, if there is a capture that can be recaptured, we keep searching, but only for moves with captures.)
+                candidateMove.GameScore = depth < maxDepth || (candidateMove.Move.IsCapture && board.SquareIsAttackedByOpponent(candidateMove.Move.TargetSquare))
+                    ? -SearchForBestMove(board, timer, bestMove.GameScore, depth + 1, depth >= maxDepth).GameScore
+                    : CalculateHeuristicScore(board, numberOfPiecesLeft, !board.IsWhiteToMove);
             }
 
             board.UndoMove(candidateMove.Move);
 
-            bestMove = candidateMove.GameScore > bestMove.GameScore ? candidateMove : bestMove;
+            if (candidateMove.GameScore > bestMove.GameScore)
+                bestMove = candidateMove;
 
             // No need to continue with the search in this branch if one of these is true:
             // * The ideal move (a checkmate) has already been found.
             // * The parent node has already found a move that would make us perform worse in this turn than we are performing now.
-            //   Thus, they will choose that move and not the one that would lead to the hypothetical situation we are analysing here.
-            if (bestMove.GameScore == int.MaxValue || previousBestMoveScore >= -bestMove.GameScore)
+            //   Thus, our opponent will choose that move and not the one that would lead to the hypothetical situation we are analysing here.
+            if (bestMove.GameScore == int.MaxValue || opponentBestScoreSoFar >= -bestMove.GameScore)
                 break;
         }
 
-        return bestMove;
+        // No legal moves were found, but we still have to return a game score for the search to work
+        if (numberOfMoves == 0)
+            bestMove.GameScore = CalculateHeuristicScore(board, numberOfPiecesLeft, board.IsWhiteToMove);
+
+        return onlyCaptures ? bestMove : (_cachedBestMoves[cacheKey] = bestMove);
     }
 
-    // Calculations: See how well we are doing looking at the piece scores, both ours (positive) and the opponent's (negative)
-    private int CalculateHeuristicScore(Board board, int numberOfPiecesLeft)
+    // Calculations:
+    // + The total score of all our pieces combined
+    // - The total score of all the opponent's pieces combined
+    private int CalculateHeuristicScore(Board board, int numberOfPiecesLeft, bool isWhite)
     {
         var heuristicScore = 0;
+        var isEndGame = numberOfPiecesLeft <= 12;
+        Square square;
+        Piece pieceInSquare;
 
         for (int squareIndex = 0, numberOfPiecesFound = 0; numberOfPiecesFound < numberOfPiecesLeft; squareIndex++)
         {
-            Square square = new(squareIndex);
-            var pieceInSquare = board.GetPiece(square);
+            square = new(squareIndex);
+            pieceInSquare = board.GetPiece(square);
             if (pieceInSquare.IsNull)
                 continue;
 
-            // To know if a piece is ours, we just have to remember that we are here because we just moved (it is the opponent's turn)
-            heuristicScore += (pieceInSquare.IsWhite != board.IsWhiteToMove ? 1 : -1) * CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite, numberOfPiecesLeft <= 12);
+            heuristicScore += (pieceInSquare.IsWhite == isWhite ? 1 : -1) * CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite, isEndGame);
             numberOfPiecesFound++;
         }
 
         return heuristicScore;
     }
 
-    // Calculations: score of the piece after moving - score of the piece before moving + score of the captured piece
-    private int CalculateMovePotentialScore(Move move, bool isWhite, bool isEndGame) => CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, isWhite, isEndGame)
+    // Calculations:
+    // + score of the piece after moving
+    // - score of the piece before moving
+    // + score of the captured piece (if any)
+    private int CalculateMovePotentialScore(Move move, bool isWhite, bool isEndGame) =>
+        CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, isWhite, isEndGame)
         - CalculatePieceScore(move.MovePieceType, move.StartSquare, isWhite, isEndGame)
-        + CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite, isEndGame);
+        + (move.IsCapture ? CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite, isEndGame) : 0);
 
-    // Calculations: the intrinsic value of the piece + its position value
-    private int CalculatePieceScore(PieceType piece, Square position, bool isWhite, bool isEndGame) => piece != PieceType.None
-        ? (int)_pieceValues[piece][isEndGame ? 1 : 0] + ((sbyte)(_pieceValues[piece][2 + (isWhite ? (7 - position.Rank) : position.Rank) + (isEndGame ? 8 : 0)] >> (8 * (isWhite ? (7 - position.File) : position.File))))
-        : 0;
+    // Calculations:
+    // + the intrinsic value of the piece (will be different during the end game)
+    // + its position value (will be different during the end game)
+    private int CalculatePieceScore(PieceType piece, Square position, bool isWhite, bool isEndGame) =>
+        (int)_pieceValues[piece][isEndGame ? 1 : 0]
+        + ((sbyte)(_pieceValues[piece][2 + (isWhite ? (7 - position.Rank) : position.Rank) + (isEndGame ? 8 : 0)] >> (8 * (isWhite ? (7 - position.File) : position.File))));
 }
