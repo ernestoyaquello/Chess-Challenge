@@ -67,7 +67,7 @@ namespace ChessChallenge.Application
             board = new Board();
             pgns = new();
 
-            BotStatsA = new BotMatchStats("IBot");
+            BotStatsA = new BotMatchStats("Human");
             BotStatsB = new BotMatchStats("IBot");
             botMatchStartFens = FileHelper.ReadResourceFile("Fens.txt").Split('\n').Where(fen => fen.Length > 0).ToArray();
             botTaskWaitHandle = new AutoResetEvent(false);
@@ -419,6 +419,7 @@ namespace ChessChallenge.Application
         public int TotalGameCount => botMatchStartFens.Length * 2;
         public int CurrGameNumber => Math.Min(TotalGameCount, botMatchGameIndex + 1);
         public string AllPGNs => pgns.ToString();
+        public ulong ZobristKey => board.ZobristKey;
 
 
         bool IsLegal(Move givenMove)
