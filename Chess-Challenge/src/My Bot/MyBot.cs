@@ -2,6 +2,17 @@
 using System.Collections.Generic;
 using System.Linq;
 
+// Current bot version: 1.1
+//
+// ---
+//
+// Stats
+//
+// 1.1 vs 1.0:
+//   * Total games:   640
+//   * Victories:   + 83
+//   * Draw:        = 522
+//   * Defeats:     - 34
 public class MyBot : IChessBot
 {
     // https://www.chessprogramming.org/PeSTO%27s_Evaluation_Function
