@@ -28,12 +28,12 @@ namespace ChessChallenge.Application
 
                 startPos.Y += spacingY * 2;
                 DrawNextText($"{controller.ZobristKey}", zobristKeyFontSize, col);
-                Vector2 zobristButtonPosition = startPos;
-                zobristButtonPosition.X += buttonSize.X / 2;
-                zobristButtonPosition.Y += buttonSize.Y / 2;
-                if (DrawCopyZobristKeyButton(zobristButtonPosition, buttonSize))
+                Vector2 copyGameMovesButtonPosition = startPos;
+                copyGameMovesButtonPosition.X += buttonSize.X / 2;
+                copyGameMovesButtonPosition.Y += buttonSize.Y / 2;
+                if (DrawCopyGameMovesButton(copyGameMovesButtonPosition, buttonSize))
                 {
-                    UIHelper.CopyToClipboard($"{controller.ZobristKey}");
+                    UIHelper.CopyToClipboard($"{controller.PrintMovesForTranspositionTable()}");
                 }
 
                 void DrawStats(ChallengeController.BotMatchStats stats)
@@ -50,9 +50,9 @@ namespace ChessChallenge.Application
                     startPos.Y += spacingY;
                 }
 
-                bool DrawCopyZobristKeyButton(Vector2 pos, Vector2 size)
+                bool DrawCopyGameMovesButton(Vector2 pos, Vector2 size)
                 {
-                    return UIHelper.Button("Copy Zobrist Key", pos, size);
+                    return UIHelper.Button("Copy Game Moves", pos, size);
                 }
             }
         }

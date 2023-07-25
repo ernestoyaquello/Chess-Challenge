@@ -290,19 +290,34 @@ public class MyBot : IChessBot
     };
 
     // TODO Check if this takes too much memory and do something to stop it if that's the case
-    private readonly Dictionary<(int, ulong), ScoredMove> _cachedBestMoves = new();
+    // TODO Compress the data/syntax somehow, otherwise we won't be able to define enough prerecorded moves
+    private readonly Dictionary<(int, ulong), ScoredMove> _cachedBestMoves = new()
+    {
+        // rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 
+        { (1, 13227872743731781434), new("d2d4") },
+
+        // rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1 
+        { (1, 13920910881790336478), new("d7d5") },
+
+        // rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6 0 2 
+        { (1, 9628964799347499318), new("c2c4") },
+    };
 
     private struct ScoredMove
     {
-        public ScoredMove(Move move, int potentialScore = int.MinValue) =>
-            (Move, PotentialScore, GameScore) = (move, potentialScore, int.MinValue);
+        public ScoredMove(string name) => this.name = name;
 
-        public Move Move { get; }
-        public int PotentialScore { get; } // Based only on the piece position change and the potential capture
-        public int GameScore { get; set; } // To be set later by the function CalculateBestMove(...)
+        public ScoredMove(Move? move, int potentialScore) => (this._move, this.potentialScore) = (move, potentialScore);
+
+        private Move? _move = null;
+        public int potentialScore = int.MinValue; // Based only on the piece position change and the potential capture
+        public int gameScore = int.MinValue; // To be set later by the function CalculateBestMove(...)
+        public string? name = null; // Will be null except for prerecorded moves
+
+        public Move GetMove(Board board) => _move ?? new(name!, board);
     }
 
-    public Move Think(Board board, Timer timer) => SearchForBestMove(board, timer).Move;
+    public Move Think(Board board, Timer timer) => SearchForBestMove(board, timer).GetMove(board);
 
     // Simple negamax algorithm to guess the best possible move
     private ScoredMove SearchForBestMove(Board board, Timer timer, int opponentBestScoreSoFar = int.MinValue, int depth = 1, bool onlyCaptures = false)
@@ -311,30 +326,31 @@ public class MyBot : IChessBot
         if (_cachedBestMoves.ContainsKey(cacheKey))
             return _cachedBestMoves[cacheKey];
 
-        var numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
+        int numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard),
+            numberOfMoves = 0,
+            maxDepth;
         var isEndGame = numberOfPiecesLeft <= 12; // not ideal, but simpler to calculate and write than more complex approaches
 
         // Moves scored by their potential and sorted from the highest to the lowest to cut off branches early
         var scoredMoves = board
             .GetLegalMoves(onlyCaptures)
             .Select(move => new ScoredMove(move, CalculateMovePotentialScore(move, board.IsWhiteToMove, isEndGame)))
-            .OrderByDescending(m => m.PotentialScore);
+            .OrderByDescending(m => m.potentialScore);
 
-        var bestMove = scoredMoves.FirstOrDefault(new ScoredMove(Move.NullMove));
-        int maxDepth;
-        var numberOfMoves = 0;
+        var bestMove = scoredMoves.FirstOrDefault(default(ScoredMove));
+
         using var scoredMovesEnumerator = scoredMoves.GetEnumerator();
-
         while (scoredMovesEnumerator.MoveNext())
         {
             var candidateMove = scoredMovesEnumerator.Current;
-            board.MakeMove(candidateMove.Move);
+            var actualCandidateMove = candidateMove.GetMove(board);
+            board.MakeMove(actualCandidateMove);
             numberOfMoves++;
 
             if (board.IsInCheckmate())
-                candidateMove.GameScore = int.MaxValue;
+                candidateMove.gameScore = int.MaxValue;
             else if (board.IsDraw())
-                candidateMove.GameScore = 0;
+                candidateMove.gameScore = 0;
             else
             {
                 // Stablish a maximum depth for the search depending on how many pieces there are left:
@@ -358,27 +374,27 @@ public class MyBot : IChessBot
                 // Search for the best move for the opponent after our candidate move, then take the inverse as our score (we take the L here).
                 // If we cannot go deeper in the search tree because we have reached the maximum depth, then we calculate the score using heuristics.
                 // (To try to avoid the horizon effect, if there is a capture that can be recaptured, we keep searching, but only for moves with captures.)
-                candidateMove.GameScore = depth < maxDepth || (candidateMove.Move.IsCapture && board.SquareIsAttackedByOpponent(candidateMove.Move.TargetSquare))
-                    ? -SearchForBestMove(board, timer, bestMove.GameScore, depth + 1, depth >= maxDepth).GameScore
+                candidateMove.gameScore = depth < maxDepth || (actualCandidateMove.IsCapture && board.SquareIsAttackedByOpponent(actualCandidateMove.TargetSquare))
+                    ? -SearchForBestMove(board, timer, bestMove.gameScore, depth + 1, depth >= maxDepth).gameScore
                     : CalculateHeuristicScore(board, numberOfPiecesLeft, !board.IsWhiteToMove);
             }
 
-            board.UndoMove(candidateMove.Move);
+            board.UndoMove(actualCandidateMove);
 
-            if (candidateMove.GameScore > bestMove.GameScore)
+            if (candidateMove.gameScore > bestMove.gameScore)
                 bestMove = candidateMove;
 
             // No need to continue with the search in this branch if one of these is true:
             // * The ideal move (a checkmate) has already been found.
             // * The parent node has already found a move that would make us perform worse in this turn than we are performing now.
             //   Thus, our opponent will choose that move and not the one that would lead to the hypothetical situation we are analysing here.
-            if (bestMove.GameScore == int.MaxValue || opponentBestScoreSoFar >= -bestMove.GameScore)
+            if (bestMove.gameScore == int.MaxValue || opponentBestScoreSoFar >= -bestMove.gameScore)
                 break;
         }
 
         // No legal moves were found, but we still have to return a game score for the search to work
         if (numberOfMoves == 0)
-            bestMove.GameScore = CalculateHeuristicScore(board, numberOfPiecesLeft, board.IsWhiteToMove);
+            bestMove.gameScore = CalculateHeuristicScore(board, numberOfPiecesLeft, board.IsWhiteToMove);
 
         return onlyCaptures ? bestMove : (_cachedBestMoves[cacheKey] = bestMove);
     }
@@ -389,14 +405,12 @@ public class MyBot : IChessBot
     private int CalculateHeuristicScore(Board board, int numberOfPiecesLeft, bool isWhite)
     {
         var heuristicScore = 0;
-        var isEndGame = numberOfPiecesLeft <= 12;
-        Square square;
-        Piece pieceInSquare;
+        var isEndGame = numberOfPiecesLeft <= 12; // not ideal, but simpler to calculate and write than more complex approaches
 
         for (int squareIndex = 0, numberOfPiecesFound = 0; numberOfPiecesFound < numberOfPiecesLeft; squareIndex++)
         {
-            square = new(squareIndex);
-            pieceInSquare = board.GetPiece(square);
+            Square square = new(squareIndex);
+            var pieceInSquare = board.GetPiece(square);
             if (pieceInSquare.IsNull)
                 continue;
 

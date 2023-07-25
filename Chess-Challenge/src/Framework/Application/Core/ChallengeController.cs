@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using static ChessChallenge.Application.Settings;
 using static ChessChallenge.Application.ConsoleHelper;
+using ChessChallenge.Application.APIHelpers;
 
 namespace ChessChallenge.Application
 {
@@ -94,6 +95,7 @@ namespace ChessChallenge.Application
             board = new Board();
             bool isGameWithHuman = whiteType is PlayerType.Human || blackType is PlayerType.Human;
             int fenIndex = isGameWithHuman ? 0 : botMatchGameIndex / 2;
+            //int fenIndex = isGameWithHuman ? 0 : new Random().Next(botMatchStartFens.Length);
             board.LoadPosition(botMatchStartFens[fenIndex]);
 
             // Player Setup
@@ -418,6 +420,34 @@ namespace ChessChallenge.Application
         public int CurrGameNumber => Math.Min(TotalGameCount, botMatchGameIndex + 1);
         public string AllPGNs => pgns.ToString();
         public ulong ZobristKey => board.ZobristKey;
+
+        public string PrintMovesForTranspositionTable()
+        {
+            var result = "";
+            var movesBackup = board.AllGameMoves.ToList();
+
+            // Print the moves as transposition table entries. Example:
+            //
+            //     // rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 
+            //     { (1, 13227872743731781434), new("e2e4") },
+            for (int index = board.AllGameMoves.Count - 1; index >= 0; index--)
+            {
+                var move = board.AllGameMoves[index];
+                var moveName = BoardHelper.SquareNameFromIndex(move.StartSquareIndex) + BoardHelper.SquareNameFromIndex(move.TargetSquareIndex);
+                result = $", new(\"{moveName}\") }},\n\n" + result;
+                board.UndoMove(move, inSearch: false);
+                result = $"{{ (1, {board.ZobristKey})" + result;
+                result = $"// {FenUtility.CurrentFen(board)} \n" + result;
+            }
+
+            // Restore the moves
+            foreach (var move in movesBackup)
+            {
+                board.MakeMove(move, inSearch: false);
+            }
+
+            return result;
+        }
 
 
         bool IsLegal(Move givenMove)
