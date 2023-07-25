@@ -337,14 +337,22 @@ public class MyBot : IChessBot
                 candidateMove.GameScore = 0;
             else
             {
-                // Change maximum depth depending on how much time we have and how many pieces there are left
+                // Stablish a maximum depth for the search depending on how many pieces there are left:
+                // * Equal or fewer than 4 pieces                         = 9
+                // * Equal or fewer than 8 pieces AND more than 4 pieces  = 8
+                // * Equal or fewer than 12 pieces AND more than 8 pieces = 7
+                // * More than 12 pieces                                  = 6
                 numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
-                maxDepth = numberOfPiecesLeft <= 5 ? 7 : 6;
-                if (timer.MillisecondsRemaining < 20000)
+                maxDepth = numberOfPiecesLeft <= 12 ?
+                    (numberOfPiecesLeft <= 8 ? (numberOfPiecesLeft <= 4 ? 9 : 8) : 7)
+                    : 6;
+
+                // reduce the maximum depth in case we are running out of time
+                if (timer.MillisecondsRemaining < 25000)
                     maxDepth -= timer.MillisecondsRemaining < 5000 ? 2 : 1;
 
-                // Reduce the maximum depth for candidate moves that didn't score high enough
-                if (maxDepth > 4 && numberOfMoves > 9)
+                // Reduce the maximum depth for candidate moves that didn't score high enough (no need to waste too much time with them)
+                if (maxDepth > 4 && numberOfMoves >= 10)
                     maxDepth--;
 
                 // Search for the best move for the opponent after our candidate move, then take the inverse as our score (we take the L here).
