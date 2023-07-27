@@ -428,15 +428,15 @@ namespace ChessChallenge.Application
 
             // Print the moves as transposition table entries. Example:
             //
-            //     // rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 
-            //     { (1, 13227872743731781434), new("e2e4") },
+            // // rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 
+            // { 13227872743731781434, (1, new("d2d4")) },
             for (int index = board.AllGameMoves.Count - 1; index >= 0; index--)
             {
                 var move = board.AllGameMoves[index];
                 var moveName = BoardHelper.SquareNameFromIndex(move.StartSquareIndex) + BoardHelper.SquareNameFromIndex(move.TargetSquareIndex);
-                result = $", new(\"{moveName}\") }},\n\n" + result;
+                result = $", (1, new(\"{moveName}\")) }},\n\n" + result;
                 board.UndoMove(move, inSearch: false);
-                result = $"{{ (1, {board.ZobristKey})" + result;
+                result = $"{{ {board.ZobristKey}" + result;
                 result = $"// {FenUtility.CurrentFen(board)} \n" + result;
             }
 
