@@ -1,4 +1,5 @@
-using ChessChallenge.API;
+﻿using ChessChallenge.API;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -267,115 +268,165 @@ public class MyBot : IChessBot
     };
 
     // TODO Check if this takes too much memory and do something to stop it if that's the case
-    private readonly Dictionary<ulong, (int, ScoredMove)> _cachedBestMoves = new();
+    private readonly Dictionary<ulong, (int, ScoredMove)> _cachedBestMoves = new()
+    {
+        // rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 
+        //{ 13227872743731781434, (999999, new("d2d4")) },
+
+        // rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1 
+        //{ 13920910881790336478, (999999, new("d7d5")) },
+
+        // rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6 0 2 
+        //{ 9628964799347499318, (999999, new("c2c4")) },
+    };
 
     private struct ScoredMove
     {
+        public ScoredMove() {}
+
         public ScoredMove(string name) => this.name = name;
 
         public ScoredMove(Move? move, int potentialScore) => (_move, this.potentialScore) = (move, potentialScore);
 
         private Move? _move = null;
-        public int potentialScore = int.MinValue; // Based only on the piece position change and the potential capture
-        public int gameScore = int.MinValue; // To be set later by the function CalculateBestMove(...)
-        public string? name = null; // Will be null except for prerecorded moves
+        public int potentialScore = -999999; // Based only on the piece position change and the potential capture
+        public int gameScore = -999999; // To be set later by the function CalculateBestMove(...)
+        public string? name = null; // Will be null except for moves prerecorded inside _cachedBestMoves
 
         public readonly Move GetMove(Board board) => _move ?? new(name!, board);
     }
 
-    public Move Think(Board board, Timer timer) => SearchForBestMove(board, timer).GetMove(board);
-
-    // Simple negamax algorithm to guess the best possible move
-    private ScoredMove SearchForBestMove(Board board, Timer timer, int opponentBestScoreSoFar = int.MinValue, int depth = 1, bool onlyCaptures = false)
+    public Move Think(Board board, Timer timer)
     {
-        if (_cachedBestMoves.TryGetValue(board.ZobristKey, out (int, ScoredMove) cachedScoredMove) && cachedScoredMove.Item1 <= depth)
+        // Get an initial result by searching with a maximum depth of 4 without a time limit to ensure the search completes
+        var (_, bestScoredMove) = SearchForBestScoredMove(board, timer, int.MaxValue, 4);
+
+        // Calculate the maximum time to elapse on this turn (let's consider that victory is always at least 30 moves away; and, at most, 50)
+        int turnTimeLimit = timer.MillisecondsElapsedThisTurn + (timer.MillisecondsRemaining / Math.Max(30, 50 - board.GameMoveHistory.Length));
+
+        // Search for the best move over and over with a bigger maximum depth on every iteration until we run out of time
+        for (int maxDepth = 5; maxDepth < 30 && timer.MillisecondsElapsedThisTurn < turnTimeLimit; maxDepth++)
         {
-            // If this position has already happened, let's change its score to zero, as it's somehow equivalent to a draw
-            if (depth == 1 && board.IsRepeatedPosition())
-                cachedScoredMove.Item2.gameScore = 0;
-
-            return (_cachedBestMoves[board.ZobristKey] = cachedScoredMove).Item2;
+            // * If the search was fully completed, we just take the result as the new best, most-accurately scored move.
+            // * If the search was only partially completed because it ran out of time, we take the result, but only if it's
+            //   better than the current one. This is because there is a chance that the move, despite having been fully
+            //   studied, is not actually the best possible one (not all moves are studied in a partially completed search).
+            var (searchStatus, newBestScoredMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth);
+            if (searchStatus == 0 || (searchStatus == 1 && newBestScoredMove.gameScore > bestScoredMove.gameScore))
+                bestScoredMove = newBestScoredMove;
         }
+        
+        return bestScoredMove.GetMove(board);
+    }
 
-        int numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard),
-            numberOfMoves = 0,
-            maxDepth;
+    // Simple negamax algorithm to search for the best possible move.
+    //
+    // The first parameter indicates:
+    //  * 0 = The search completed, so the returned move is valid
+    //  * 1 = The returned move is valid, but the search didn't have time to complete, so not all possible moves were studied (meaning that the returned one might not actually be the best one)
+    //  * 2 = The returned move is not valid and must be discarded because the search didn't have time to fully study any of the possible moves
+    private (int, ScoredMove) SearchForBestScoredMove(Board board, Timer timer, int turnTimeLimit, int maxDepth, int depth = 1, int bestOpponentScoreSoFar = -999999, bool onlyCaptures = false)
+    {
+        int searchAccuracy = 1 + Math.Max(0, maxDepth - depth);
+
+        if (!onlyCaptures && _cachedBestMoves.TryGetValue(board.ZobristKey, out (int, ScoredMove) cachedScoredMove) && cachedScoredMove.Item1 >= searchAccuracy)
+            return (0, cachedScoredMove.Item2);
+
+        var numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
         var isEndGame = numberOfPiecesLeft <= 12; // not ideal, but simpler to calculate and write than more complex approaches
-
-        // Moves scored by their potential and sorted from the highest to the lowest to cut off branches early
         var scoredMoves = board
             .GetLegalMoves(onlyCaptures)
             .Select(move => new ScoredMove(move, CalculateMovePotentialScore(move, board.IsWhiteToMove, isEndGame)))
-            .OrderByDescending(m => m.potentialScore);
+            .OrderByDescending(m => m.potentialScore) // sort moves by potential to cut off branches early
+            .ToArray();
+        var bestMove = scoredMoves.FirstOrDefault(new ScoredMove());
+        var numberOfFullyStudiedMoves = 0;
+        var ranOutOfTimeToContinue = false;
 
-        var bestMove = scoredMoves.FirstOrDefault(default(ScoredMove));
-
-        using var scoredMovesEnumerator = scoredMoves.GetEnumerator();
-        while (scoredMovesEnumerator.MoveNext())
+        while (numberOfFullyStudiedMoves < scoredMoves.Length)
         {
-            var candidateMove = scoredMovesEnumerator.Current;
-            var actualCandidateMove = candidateMove.GetMove(board);
-            board.MakeMove(actualCandidateMove);
-            numberOfMoves++;
+            var scoredCandidateMove = scoredMoves[numberOfFullyStudiedMoves];
+            var candidateMove = scoredCandidateMove.GetMove(board);
+            var recaptureDetected = candidateMove.IsCapture && board.SquareIsAttackedByOpponent(candidateMove.TargetSquare);
+
+            board.MakeMove(candidateMove);
 
             if (board.IsInCheckmate())
-                candidateMove.gameScore = int.MaxValue;
+                scoredCandidateMove.gameScore = 999999;
             else if (board.IsDraw())
-                candidateMove.gameScore = 0;
+                scoredCandidateMove.gameScore = 0;
             else
             {
-                // Stablish a maximum depth for the search depending on how many pieces there are left:
-                // * Equal or fewer than 4 pieces                         = 8
-                // * Equal or fewer than 8 pieces AND more than 4 pieces  = 7
-                // * Equal or fewer than 12 pieces AND more than 8 pieces = 6
-                // * More than 12 pieces                                  = 5
-                numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
-                maxDepth = numberOfPiecesLeft <= 12 ?
-                    (numberOfPiecesLeft <= 8 ? (numberOfPiecesLeft <= 4 ? 8 : 7) : 6)
-                    : 5;
+                // If the move didn't score high enough, it's likely a loser move that isn't worth studying for too long, so we reduce the maximum depth
+                var newMaxDepth = Math.Max(4, maxDepth - (numberOfFullyStudiedMoves / 10));
 
-                // reduce the maximum depth in case we are running out of time
-                if (timer.MillisecondsRemaining < 25000)
-                    maxDepth -= timer.MillisecondsRemaining < 5000 && maxDepth > 5 ? 2 : 1;
-
-                // Reduce the maximum depth for candidate moves that didn't score high enough (no need to waste too much time with potentially loser moves)
-                if (maxDepth > 4 && numberOfMoves >= 10)
-                    maxDepth--;
-
-                // Search for the best move for the opponent after our candidate move, then take the inverse as our score (we take the L here).
-                // If we cannot go deeper in the search tree because we have reached the maximum depth, then we calculate the score using heuristics.
-                // (To try to avoid the horizon effect, if there is a capture that can be recaptured, we keep searching, but only for moves with captures.)
-                candidateMove.gameScore = depth <= maxDepth || (actualCandidateMove.IsCapture && board.SquareIsAttackedByOpponent(actualCandidateMove.TargetSquare))
-                    ? -SearchForBestMove(board, timer, bestMove.gameScore, depth + 1, depth > maxDepth).gameScore
-                    : CalculateHeuristicScore(board, numberOfPiecesLeft, !board.IsWhiteToMove);
+                // We keep searching down the tree, as long as we haven't reached the maximum depth yet.
+                // To try to avoid the horizon effect, we keep searching regardless of the maximum depth if:
+                // * We have detected a recapture (in this case, we only keep going while there are recaptures).
+                // * The player is in check.
+                if (depth < newMaxDepth || recaptureDetected || board.IsInCheck())
+                {
+                    var (searchStatus, opponentBestMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, newMaxDepth, depth + 1, bestMove.gameScore, recaptureDetected && depth >= newMaxDepth);
+                    if (searchStatus == 0)
+                        // If the returned move is valid, we take it into account with a negative value (what's good for the opponent is bad for us)
+                        scoredCandidateMove.gameScore = -opponentBestMove.gameScore;
+                    else
+                        // If the inner search we just invoked didn't fully complete, we need to cancel this search too
+                        ranOutOfTimeToContinue = true;
+                }
+                else
+                    // We cannot search further down the tree, time to calculate the score with heuristics
+                    scoredCandidateMove.gameScore = CalculateHeuristicScore(board, !board.IsWhiteToMove);
             }
 
-            board.UndoMove(actualCandidateMove);
+            board.UndoMove(candidateMove);
 
-            if (candidateMove.gameScore > bestMove.gameScore)
-                bestMove = candidateMove;
+            if (!ranOutOfTimeToContinue)
+            {
+                // This candidate move was fully studied because the search wasn't cancelled, so we need to see if it is actually the new best move
+                numberOfFullyStudiedMoves++;
+                if (scoredCandidateMove.gameScore > bestMove.gameScore)
+                    bestMove = scoredCandidateMove;
 
-            // No need to continue with the search in this branch if one of these is true:
+                // If we have reached the time limit after this iteration without having studied all the possible moves, we must cancel the search
+                ranOutOfTimeToContinue = timer.MillisecondsElapsedThisTurn >= turnTimeLimit && numberOfFullyStudiedMoves < scoredMoves.Length;
+
+            }
+
+            // There is no need to continue with the search on this branch if one of these is true:
             // * The ideal move (a checkmate) has already been found.
             // * The parent node has already found a move that would make us perform worse in this turn than we are performing now.
             //   Thus, our opponent will choose that move and not the one that would lead to the hypothetical situation we are analysing here.
-            if (bestMove.gameScore == int.MaxValue || opponentBestScoreSoFar >= -bestMove.gameScore)
+            // * The search has been cancelled because it ran out of time.
+            if (bestMove.gameScore == 999999 || bestOpponentScoreSoFar >= -bestMove.gameScore || ranOutOfTimeToContinue)
                 break;
         }
 
-        // No legal moves were found, but we still have to return a game score for the search to work
-        if (numberOfMoves == 0)
-            bestMove.gameScore = CalculateHeuristicScore(board, numberOfPiecesLeft, board.IsWhiteToMove);
+        if (!ranOutOfTimeToContinue)
+        {
+            // No legal moves were found, but we still have to return a score for the search to work
+            if (numberOfFullyStudiedMoves == 0)
+                bestMove.gameScore = CalculateHeuristicScore(board, board.IsWhiteToMove);
 
-        return onlyCaptures ? bestMove : (_cachedBestMoves[board.ZobristKey] = (depth, bestMove)).Item2;
+            // Don't save anything to the cache unless we did a full search that included all possible moves
+            if (!onlyCaptures)
+                _cachedBestMoves[board.ZobristKey] = (searchAccuracy, bestMove);
+
+            return (0, bestMove);
+        }
+
+        // The search was cancelled, so we just return the best move, indicating whether it is valid or not. For it to be valid,
+        // it needs to have been fully studied, meaning that the moves loop finished at least one iteration without cancellations.
+        return (numberOfFullyStudiedMoves > 0 ? 1 : 2, bestMove);
     }
 
     // Calculations:
     // + The total score of all our pieces combined
     // - The total score of all the opponent's pieces combined
-    private int CalculateHeuristicScore(Board board, int numberOfPiecesLeft, bool isWhite)
+    private int CalculateHeuristicScore(Board board, bool isWhite)
     {
         var heuristicScore = 0;
+        var numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
         var isEndGame = numberOfPiecesLeft <= 12; // not ideal, but simpler to calculate and write than more complex approaches
 
         for (int squareIndex = 0, numberOfPiecesFound = 0; numberOfPiecesFound < numberOfPiecesLeft; squareIndex++)
@@ -393,17 +444,17 @@ public class MyBot : IChessBot
     }
 
     // Calculations:
-    // + score of the piece after moving
-    // - score of the piece before moving
-    // + score of the captured piece multiplied by 10 (if any)
+    // + Score of the piece after moving
+    // - Score of the piece before moving
+    // + Score of the captured piece multiplied by 100 (if any)
     private int CalculateMovePotentialScore(Move move, bool isWhite, bool isEndGame) =>
         CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, isWhite, isEndGame)
         - CalculatePieceScore(move.MovePieceType, move.StartSquare, isWhite, isEndGame)
-        + (move.IsCapture ? (10 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite, isEndGame)) : 0);
+        + (move.IsCapture ? (100 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite, isEndGame)) : 0);
 
     // Calculations:
-    // + the intrinsic value of the piece (will be different during the end game)
-    // + its position value (will also be different during the end game)
+    // + The intrinsic value of the piece (will be different during the end game)
+    // + Its position value (will also be different during the end game)
     private int CalculatePieceScore(PieceType piece, Square position, bool isWhite, bool isEndGame)
     {
         var pieceOffset = 18 * (((int)piece) - 1);
