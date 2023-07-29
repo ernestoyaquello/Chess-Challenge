@@ -3,17 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-// Current bot version: 1.1
-//
-// ---
-//
-// Stats
-//
-// 1.1 vs 1.0:
-//   * Total games:   640
-//   * Victories:   + 83
-//   * Draw:        = 522
-//   * Defeats:     - 34
 public class MyBot : IChessBot
 {
     // https://www.chessprogramming.org/PeSTO%27s_Evaluation_Function
@@ -285,28 +274,36 @@ public class MyBot : IChessBot
         14690438475869776085,
     };
 
-    // TODO Check if this takes too much memory and do something to stop it if that's the case, as the limit is 256mb
+    // The limit as to how many results we can cache is so high that we don't really need to worry about it:
+    //
+    // Key:                  = 64 bits (ulong)
+    // Value, first:         = 32 bits (int)
+    // Value, second:        = 96 bits (ScoredMove)
+    // Total per cache entry = 192 bits
+    // 256 MB (max allowed)  = 2048000000096 bits (simplified/reduced to 2000000000000)
+    // RESULT                = 10416666666 entries as a maximum (2000000000000 / 192)
     private readonly Dictionary<ulong, (int, ScoredMove)> _cachedBestMoves = new();
 
     private struct ScoredMove
     {
         public ScoredMove(Move move, int potentialScore) => (this.move, this.potentialScore) = (move, potentialScore);
 
-        public Move move = Move.NullMove;
-        public int potentialScore = -999999; // Based only on the piece position change and the potential capture
-        public int gameScore = -999999; // To be set later by the function CalculateBestMove(...)
+        public Move move = new();
+        public int potentialScore = -10000000; // Based only on the piece position change and the potential capture
+        public int gameScore = -10000000; // To be set later by the function CalculateBestMove(...)
     }
 
     public Move Think(Board board, Timer timer)
     {
-        // Get an initial result by searching with a maximum depth of 4 without a time limit to ensure the search completes
-        var (_, bestScoredMove) = SearchForBestScoredMove(board, timer, int.MaxValue, 4);
+        // Get an initial result by searching with a maximum depth of 3 and no time limit (this is to ensure the search completes)
+        var maxDepth = 3;
+        var (_, bestScoredMove) = SearchForBestScoredMove(board, timer, int.MaxValue, maxDepth);
 
         // Calculate the maximum time we can elapse this turn, assuming that there will be less remaining moves the fewer pieces there are left
-        int turnTimeLimit = timer.MillisecondsElapsedThisTurn + (timer.MillisecondsRemaining / (15 + BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard)));
+        var turnTimeLimit = timer.MillisecondsElapsedThisTurn + (timer.MillisecondsRemaining / (20 + BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard)));
 
         // Search for the best move over and over with a bigger maximum depth on every iteration until we run out of time
-        for (int maxDepth = 5; maxDepth < 100 && timer.MillisecondsElapsedThisTurn < turnTimeLimit; maxDepth++)
+        while (++maxDepth < 30 && timer.MillisecondsElapsedThisTurn < turnTimeLimit)
         {
             // * If the search was fully completed, we just take the result as the new best, most-accurately scored move.
             // * If the search was only partially completed because it ran out of time, we take the result, but only if it's
@@ -314,9 +311,14 @@ public class MyBot : IChessBot
             //   studied, is not actually the best possible one (not all moves are studied in a partially completed search).
             var (searchStatus, newBestScoredMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth);
             if (searchStatus == 0 || (searchStatus == 1 && newBestScoredMove.gameScore > bestScoredMove.gameScore))
+            //{
                 bestScoredMove = newBestScoredMove;
+            //    Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth} ({(searchStatus == 0 ? "full search" : "partial search")})\n");
+            //}
+            //else
+            //    Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth - 1} (search for max depth {maxDepth} cancelled)\n");
         }
-        
+
         return bestScoredMove.move;
     }
 
@@ -328,24 +330,38 @@ public class MyBot : IChessBot
     //  * 1 = The returned move is valid, but the search didn't have time to complete fully, so not all possible moves were studied.
     //        This means that the returned move might not actually be the best one of all the possible moves.
     //  * 2 = The returned move is not valid and must be discarded, as the search didn't have time to fully study any of the possible moves.
-    private (int, ScoredMove) SearchForBestScoredMove(Board board, Timer timer, int turnTimeLimit, int maxDepth, int depth = 1, int bestScoreSoFar = -999999, int bestOpponentScoreSoFar = -999999, bool onlyCaptures = false)
+    private (int, ScoredMove) SearchForBestScoredMove(Board board, Timer timer, int turnTimeLimit, int maxDepth, int depth = 1, int bestScoreSoFar = -10000000, int bestOpponentScoreSoFar = -10000000, bool onlyCaptures = false)
     {
         int searchAccuracy = 1 + Math.Max(0, maxDepth - depth);
+
+        // If this board state has already come up before and we have cached a result for it with enough accuracy, return that directly to avoid doing any calculations
         if (!onlyCaptures && _cachedBestMoves.TryGetValue(board.ZobristKey, out (int, ScoredMove) cachedScoredMove) && cachedScoredMove.Item1 >= searchAccuracy)
             return (0, cachedScoredMove.Item2);
 
-        var isEndGame = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) <= 12; // not ideal, but simpler to calculate and write than more complex approaches
+        // Not an ideal way to calculate if we are in the end game or not, but it's much faster and simple than other approaches
+        var isEndGame = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) <= 12;
+        var opponentKingSquare = board.GetKingSquare(!board.IsWhiteToMove);
         var scoredMoves = board
             .GetLegalMoves(onlyCaptures)
-            .Select(move => new ScoredMove(move, CalculateMovePotentialScore(move, board.IsWhiteToMove, isEndGame)))
-            .OrderByDescending(m => m.potentialScore) // sort moves by potential to cut off branches early
-            .ToArray();
+            .Select(move => new ScoredMove(
+                move,
 
+                // We calculate the potential score of each move like this:
+                // + Score of the piece after moving (divided by 2 if the target square is attacked, as there is a chance the piece will be captured)
+                // - Score of the piece before moving
+                // + Score of the captured piece (the king is counted as a "captured" piece with a value of 2000)
+                potentialScore: (CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, board.IsWhiteToMove, isEndGame) >> (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 1: 0))
+                    - CalculatePieceScore(move.MovePieceType, move.StartSquare, board.IsWhiteToMove, isEndGame)
+                    + (move.IsCapture ? CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !board.IsWhiteToMove, isEndGame) : (opponentKingSquare == move.TargetSquare ? 2000 : 0))
+                )
+            )
+            .OrderByDescending(m => m.potentialScore) // very important to sort moves by potential score to prune search branches early!
+            .ToArray();
         var bestMove = scoredMoves.FirstOrDefault(new ScoredMove());
         var numberOfFullyStudiedMoves = 0;
-        var timeoutCancellation = false;
+        var timeoutCancellation = timer.MillisecondsElapsedThisTurn >= turnTimeLimit;
 
-        while (numberOfFullyStudiedMoves < scoredMoves.Length)
+        while (numberOfFullyStudiedMoves < scoredMoves.Length && !timeoutCancellation)
         {
             var scoredCandidateMove = scoredMoves[numberOfFullyStudiedMoves];
             var candidateMove = scoredCandidateMove.move;
@@ -354,22 +370,19 @@ public class MyBot : IChessBot
             board.MakeMove(candidateMove);
 
             if (board.IsInCheckmate())
-                scoredCandidateMove.gameScore = 999999;
+                scoredCandidateMove.gameScore = 10000000;
             else if (board.IsDraw())
                 scoredCandidateMove.gameScore = 0;
             else if (depth < maxDepth || board.IsInCheck() || recaptureDetected)
             {
-                // We keep searching down the tree because either of these is true:
+                // We keep searching down the tree because either of these was true:
                 // * We haven't reached the maximum depth yet.
                 // * The opponent is in check, so we keep going to avoid the horizon effect.
                 // * We have detected a recapture, so we keep going to avoid the horizon effect (in this case, we only keep going while there are recaptures).
-                var (searchStatus, opponentBestMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth, depth + 1, bestOpponentScoreSoFar, bestScoreSoFar, depth >= maxDepth && !board.IsInCheck() && recaptureDetected);
-                if (searchStatus == 0)
+                var (searchStatus, opponentBestMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth, depth + 1, bestOpponentScoreSoFar, bestScoreSoFar, depth >= maxDepth && !board.IsInCheck());
+                if (!(timeoutCancellation = searchStatus != 0))
                     // If the returned move is valid, we take it into account with a negative value (what's good for the opponent is bad for us)
                     scoredCandidateMove.gameScore = -opponentBestMove.gameScore;
-                else
-                    // If the inner search we just invoked didn't fully complete, we need to cancel this search too
-                    timeoutCancellation = true;
             }
             else
                 // We cannot search further down the tree, time to calculate the score with heuristics
@@ -380,31 +393,29 @@ public class MyBot : IChessBot
             if (!timeoutCancellation)
             {
                 // This candidate move was fully studied because the search wasn't cancelled, so we need to see if it is actually the new best move
-                numberOfFullyStudiedMoves++;
                 if (scoredCandidateMove.gameScore > bestMove.gameScore)
                     bestScoreSoFar = Math.Max((bestMove = scoredCandidateMove).gameScore, bestScoreSoFar);
 
                 // If we have reached the time limit after this iteration without having studied all the possible moves, we must cancel the search
-                timeoutCancellation = timer.MillisecondsElapsedThisTurn >= turnTimeLimit && numberOfFullyStudiedMoves < scoredMoves.Length;
+                timeoutCancellation = ++numberOfFullyStudiedMoves < scoredMoves.Length && timer.MillisecondsElapsedThisTurn >= turnTimeLimit;
             }
 
-            // There is no need to continue with the search on this branch if one of these is true:
+            // For efficiency, we prune branches here. Basically, there is no need to continue with the search on this branch if one of these is true:
             // * The ideal move (a checkmate) has already been found.
             // * The best score we have found so far on this branch is too high, as the opponent has already found a move that would give us a lower score.
-            //   Therefore, the scenario we are analysing won't ever happen becuse the opponent already knows a way to make us perform worse than here.
-            // * The search has been cancelled because it ran out of time.
-            if (bestMove.gameScore == 999999 || bestScoreSoFar >= -bestOpponentScoreSoFar || timeoutCancellation)
+            //   Therefore, the scenario we are studying won't ever happen becuse the opponent already knows a way to make us perform worse than here.
+            if (bestMove.gameScore == 10000000 || bestScoreSoFar >= -bestOpponentScoreSoFar)
                 break;
         }
 
         if (!timeoutCancellation)
         {
-            if (numberOfFullyStudiedMoves == 0)
+            if (scoredMoves.Length == 0)
                 // No legal moves were found, but we still have to return a score for the search to work properly
                 // (I'm not sure why this happens, I'll have to investigate, but it does happen...)
                 bestMove.gameScore = CalculateHeuristicScore(board, board.IsWhiteToMove);
             else if (numberOfFullyStudiedMoves == scoredMoves.Length && !onlyCaptures)
-                // We did a full search that studied all the possible moves, so we store the result in the cache
+                // We did a full search that studied all the possible moves, both capturing and non-capturing ones, so we store the result in the cache
                 _cachedBestMoves[board.ZobristKey] = (searchAccuracy, bestMove);
 
             return (0, bestMove);
@@ -421,35 +432,31 @@ public class MyBot : IChessBot
     // https://www.chessprogramming.org/PeSTO%27s_Evaluation_Function
     private int CalculateHeuristicScore(Board board, bool isWhite)
     {
-        int middleGameScore = 0, endGameScore = 0, gamePhaseWeight = 0;
+        int middleGameScore = 0,
+            endGameScore = 0,
+            gamePhaseWeight = 0,
+            squareIndex = 0,
+            numberOfPiecesFound = 0,
+            numberOfPiecesOnTheBoard = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
 
-        var numberOfPiecesLeft = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard);
-        for (int squareIndex = 0, numberOfPiecesFound = 0; numberOfPiecesFound < numberOfPiecesLeft; squareIndex++)
+        // TODO Make this more efficient by somehow iterating only over the positions known to have pieces
+        while (numberOfPiecesFound < numberOfPiecesOnTheBoard)
         {
-            Square square = new(squareIndex);
+            Square square = new(squareIndex++);
             var pieceInSquare = board.GetPiece(square);
             if (pieceInSquare.IsNull)
                 continue;
 
-            var signModifier = pieceInSquare.IsWhite == isWhite ? 1 : -1;
-            middleGameScore += signModifier * CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite, false);
-            endGameScore += signModifier * CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite, true);
-            gamePhaseWeight += (int)_pieceValues[(19 * (((int)pieceInSquare.PieceType) - 1)) + 2];
+            var colorSignModifier = pieceInSquare.IsWhite == isWhite ? 1 : -1;
+            middleGameScore += colorSignModifier * CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite, false);
+            endGameScore += colorSignModifier * CalculatePieceScore(pieceInSquare.PieceType, square, pieceInSquare.IsWhite, true);
+            gamePhaseWeight += (int)_pieceValues[2 + (19 * (((int)pieceInSquare.PieceType) - 1))];
 
             numberOfPiecesFound++;
         }
 
         return (middleGameScore * gamePhaseWeight) + (endGameScore * (24 - gamePhaseWeight));
     }
-
-    // Calculations:
-    // + Score of the piece after moving
-    // - Score of the piece before moving
-    // + Score of the captured piece, if any, multiplied by 100 (this is to heavily prioritise capturing moves)
-    private int CalculateMovePotentialScore(Move move, bool isWhite, bool isEndGame) =>
-        CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, isWhite, isEndGame)
-        - CalculatePieceScore(move.MovePieceType, move.StartSquare, isWhite, isEndGame)
-        + (move.IsCapture ? (100 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite, isEndGame)) : 0);
 
     // Calculations:
     // + The intrinsic value of the piece (will be different during the end game)
