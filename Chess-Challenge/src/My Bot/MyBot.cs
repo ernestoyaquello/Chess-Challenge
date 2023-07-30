@@ -339,8 +339,8 @@ public class MyBot : IChessBot
         if (!onlyCaptures && _cachedBestMoves.TryGetValue(board.ZobristKey, out (int, ScoredMove) cachedScoredMove) && cachedScoredMove.Item1 >= searchAccuracy)
             return (0, cachedScoredMove.Item2);
 
-        // Not an ideal way to calculate if we are in the end game or not, but it's much faster and simple than other approaches
-        var isEndGame = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) <= 12;
+        // Get moves sorted by their potential score to make sure we prune bad branches as early as possible
+        var isRoughlyEndGame = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) <= 12;
         var opponentKingSquare = board.GetKingSquare(!board.IsWhiteToMove);
         var scoredMoves = board
             .GetLegalMoves(onlyCaptures)
@@ -351,13 +351,14 @@ public class MyBot : IChessBot
                 // + Score of the piece after moving (divided by 2 if the target square is attacked, as there is a chance the piece will be captured)
                 // - Score of the piece before moving
                 // + Score of the captured piece, multiplied by 10 to prioritise captures above all (the king is counted as a "captured" piece with a value of 5000)
-                potentialScore: (CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, board.IsWhiteToMove, isEndGame) >> (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 1: 0))
-                    - CalculatePieceScore(move.MovePieceType, move.StartSquare, board.IsWhiteToMove, isEndGame)
-                    + (move.IsCapture ? (10 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !board.IsWhiteToMove, isEndGame)) : (opponentKingSquare == move.TargetSquare ? 50000 : 0))
+                potentialScore: (CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, board.IsWhiteToMove, isRoughlyEndGame) >> (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 1: 0))
+                    - CalculatePieceScore(move.MovePieceType, move.StartSquare, board.IsWhiteToMove, isRoughlyEndGame)
+                    + (move.IsCapture ? (10 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !board.IsWhiteToMove, isRoughlyEndGame)) : (opponentKingSquare == move.TargetSquare ? 50000 : 0))
                 )
             )
-            .OrderByDescending(m => m.potentialScore) // very important to sort moves by their potential score to prune search branches early!
+            .OrderByDescending(m => m.potentialScore)
             .ToArray();
+
         var bestMove = scoredMoves.FirstOrDefault(new ScoredMove());
         var numberOfFullyStudiedMoves = 0;
         var timeoutCancellation = timer.MillisecondsElapsedThisTurn >= turnTimeLimit;
@@ -416,12 +417,12 @@ public class MyBot : IChessBot
             return (numberOfFullyStudiedMoves > 0 ? 1 : 2, bestMove);
 
         if (scoredMoves.Length == 0)
-            // No legal moves were found, but we still have to return a score for the search to work properly
-            // (I'm not sure why this happens, I'll have to investigate, but it does happen...)
+            // No legal moves were found, but we still have to return a score for the search to work properly.
+            // This might happen when searching for captures only, as the previous move might have left us with no capturing moves here.
             bestMove.gameScore = CalculateHeuristicScore(board, board.IsWhiteToMove);
         else if (numberOfFullyStudiedMoves == scoredMoves.Length && !onlyCaptures)
             // We did a full search that studied all the possible moves, both capturing and non-capturing ones, so we store the result in the cache
-            _cachedBestMoves[board.ZobristKey] = (bestMove.gameScore < 10000000 ? searchAccuracy : 30, bestMove);
+            _cachedBestMoves[board.ZobristKey] = (bestMove.gameScore < 10000000 ? searchAccuracy : 100, bestMove);
 
         return (0, bestMove);
     }
