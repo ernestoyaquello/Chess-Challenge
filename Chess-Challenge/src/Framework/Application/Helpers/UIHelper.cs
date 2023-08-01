@@ -130,10 +130,5 @@ namespace ChessChallenge.Application
                 Raylib.UnloadShader(shader);
             }
         }
-
-        public static void CopyToClipboard(string text)
-        {
-            Raylib.SetClipboardText(text);
-        }
     }
 }

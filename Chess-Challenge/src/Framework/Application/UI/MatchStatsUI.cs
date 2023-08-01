@@ -1,6 +1,5 @@
 ﻿using Raylib_cs;
 using System.Numerics;
-using System;
 
 namespace ChessChallenge.Application
 {
@@ -13,8 +12,6 @@ namespace ChessChallenge.Application
                 int nameFontSize = UIHelper.ScaleInt(40);
                 int regularFontSize = UIHelper.ScaleInt(35);
                 int headerFontSize = UIHelper.ScaleInt(45);
-                int zobristKeyFontSize = UIHelper.ScaleInt(30);
-                Vector2 buttonSize = UIHelper.Scale(new Vector2(260, 55));
                 Color col = new(180, 180, 180, 255);
                 Vector2 startPos = UIHelper.Scale(new Vector2(1500, 250));
                 float spacingY = UIHelper.Scale(35);
@@ -25,16 +22,6 @@ namespace ChessChallenge.Application
                 DrawStats(controller.BotStatsA);
                 startPos.Y += spacingY * 2;
                 DrawStats(controller.BotStatsB);
-
-                startPos.Y += spacingY * 2;
-                DrawNextText($"{controller.ZobristKey}", zobristKeyFontSize, col);
-                Vector2 copyGameMovesButtonPosition = startPos;
-                copyGameMovesButtonPosition.X += buttonSize.X / 2;
-                copyGameMovesButtonPosition.Y += buttonSize.Y / 2;
-                if (DrawCopyGameMovesButton(copyGameMovesButtonPosition, buttonSize))
-                {
-                    UIHelper.CopyToClipboard($"{controller.PrintMovesForTranspositionTable()}");
-                }
 
                 void DrawStats(ChallengeController.BotMatchStats stats)
                 {
@@ -48,11 +35,6 @@ namespace ChessChallenge.Application
                 {
                     UIHelper.DrawText(text, startPos, fontSize, 1, col);
                     startPos.Y += spacingY;
-                }
-
-                bool DrawCopyGameMovesButton(Vector2 pos, Vector2 size)
-                {
-                    return UIHelper.Button("Copy Game Moves", pos, size);
                 }
             }
         }
