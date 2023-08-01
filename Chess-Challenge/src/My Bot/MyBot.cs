@@ -277,7 +277,7 @@ public class MyBot : IChessBot
     // TODO Convert into a normal array? Might be more efficient
     private readonly Dictionary<ulong, ScoredMove> _cachedBestMoves = new();
 
-    private struct ScoredMove
+    public struct ScoredMove
     {
         public ScoredMove(Move wrappedMove) => (move, gameScore, gameScoreAccuracy) = (wrappedMove, -10000000, 0);
 
@@ -326,7 +326,7 @@ public class MyBot : IChessBot
     //  * 1 = The returned move is valid, but the search didn't have time to complete fully, so not all possible moves were studied.
     //        This means that the returned move might not actually be the best one of all the possible moves.
     //  * 2 = The returned move is not valid and must be discarded, as the search didn't have time to fully study any of the possible moves.
-    private (int, ScoredMove) SearchForBestScoredMove(Board board, Timer timer, int turnTimeLimit, int maxDepth, int depth = 1, int bestScoreSoFar = -10000000, int bestOpponentScoreSoFar = -10000000, bool onlyCaptures = false)
+    public (int, ScoredMove) SearchForBestScoredMove(Board board, Timer timer, int turnTimeLimit, int maxDepth, int depth = 1, int bestScoreSoFar = -10000000, int bestOpponentScoreSoFar = -10000000, bool onlyCaptures = false)
     {
         int searchAccuracy = 1 + Math.Max(0, maxDepth - depth);
 
@@ -429,7 +429,7 @@ public class MyBot : IChessBot
     //    +/- 100 as a bonus for having the right to move
     //    +/- 10 * (non-capturing moves available to the player with the right to move - non-capturing moves available to the idle player)
     //    +/- 50 * (capturing moves available to the player with the right to move - capturing moves available to the idle player)
-    private int CalculateHeuristicScore(Board board, bool isWhite)
+    public int CalculateHeuristicScore(Board board, bool isWhite)
     {
         int middleGameScore = 0,
             endGameScore = 0,
@@ -462,7 +462,7 @@ public class MyBot : IChessBot
     // Calculations:
     // + The intrinsic value of the piece (will be different during the end game)
     // + Its position value (will also be different during the end game)
-    private int CalculatePieceScore(PieceType piece, Square position, bool isWhite, bool isEndGame)
+    public int CalculatePieceScore(PieceType piece, Square position, bool isWhite, bool isEndGame)
     {
         var pieceOffset = 19 * (((int)piece) - 1);
         var endGameOffset = isEndGame ? 1 : 0;
