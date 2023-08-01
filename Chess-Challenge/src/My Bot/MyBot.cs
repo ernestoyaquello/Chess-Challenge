@@ -274,24 +274,17 @@ public class MyBot : IChessBot
         14690438475869776085,
     };
 
-    // TODO Convert to array: https://discord.com/channels/1132289356011405342/1133965657441042552/1133965657441042552
-    // The limit as to how many results we can cache is so high that we don't really need to worry about it:
-    //
-    // Key:                  = 64 bits (ulong)
-    // Value, first:         = 32 bits (int)
-    // Value, second:        = 96 bits (ScoredMove)
-    // Total per cache entry = 192 bits
-    // 256 MB (max allowed)  = 2048000000096 bits (simplified/reduced to 2000000000000)
-    // RESULT                = 10416666666 entries as a maximum (2000000000000 / 192)
-    private readonly Dictionary<ulong, (int, ScoredMove)> _cachedBestMoves = new();
+    // TODO Convert into a normal array? Might be more efficient
+    private readonly Dictionary<ulong, ScoredMove> _cachedBestMoves = new();
 
     private struct ScoredMove
     {
-        public ScoredMove(Move move, int potentialScore) => (this.move, this.potentialScore) = (move, potentialScore);
+        public ScoredMove(Move wrappedMove) => (move, gameScore, gameScoreAccuracy) = (wrappedMove, -10000000, 0);
 
-        public Move move = new();
-        public int potentialScore = -10000000; // Based only on the piece position change and the potential capture
-        public int gameScore = -10000000; // To be set later by the function CalculateBestMove(...)
+        public Move move;
+
+        public int gameScore; // To be set later by the function SearchForBestScoredMove(...)
+        public int gameScoreAccuracy; // To be set later by the function SearchForBestScoredMove(...)
     }
 
     public Move Think(Board board, Timer timer)
@@ -312,18 +305,20 @@ public class MyBot : IChessBot
             //   studied, is not actually the best possible one (not all moves are studied in a partially completed search).
             var (searchStatus, newBestScoredMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth);
             if (searchStatus == 0 || (searchStatus == 1 && newBestScoredMove.gameScore > bestScoredMove.gameScore))
-            //{
+//            {
                 bestScoredMove = newBestScoredMove;
-            //    Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth} ({(searchStatus == 0 ? "full search" : "partial search")})\n");
-            //}
-            //else
-            //    Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth - 1} (full search; search with max depth {maxDepth} cancelled)\n");
+//                Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth} ({(searchStatus == 0 ? "full search" : "partial search")})");
+//            }
+//            else
+//                Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth - 1} (full search; search with max depth {maxDepth} cancelled)");
+
         }
 
+//        Console.WriteLine($"Score of chosen move = {bestScoredMove.gameScore}\n");
         return bestScoredMove.move;
     }
 
-    // Negamax algorithm that will go down the search tree until reaching the maximum depth, playing turns to try to find the best possible one.
+    // Negamax algorithm that will go down the search tree until reaching the maximum depth, playing turns to try to find the best possible move.
     //
     // The first return parameter indicates the search completion status:
     //  * 0 = The search completed, so the returned move is valid, and the best one theoretically for the given maximum depth.
@@ -336,43 +331,47 @@ public class MyBot : IChessBot
         int searchAccuracy = 1 + Math.Max(0, maxDepth - depth);
 
         // If this board state has already come up before and we have cached a result for it with enough accuracy, return that directly to avoid doing any calculations
-        if (!onlyCaptures && _cachedBestMoves.TryGetValue(board.ZobristKey, out (int, ScoredMove) cachedScoredMove) && cachedScoredMove.Item1 >= searchAccuracy)
-            return (0, cachedScoredMove.Item2);
+        if (!onlyCaptures && _cachedBestMoves.TryGetValue(board.ZobristKey, out ScoredMove cachedScoredMove) && cachedScoredMove.gameScoreAccuracy >= searchAccuracy)
+            return (0, cachedScoredMove);
 
         // Get moves sorted by their potential score to make sure we prune bad branches as early as possible
         var isRoughlyEndGame = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) <= 12;
         var opponentKingSquare = board.GetKingSquare(!board.IsWhiteToMove);
         var scoredMoves = board
             .GetLegalMoves(onlyCaptures)
-            .Select(move => new ScoredMove(
-                move,
-
+            .OrderByDescending(move =>
                 // We calculate the potential score of each move like this:
                 // + Score of the piece after moving (divided by 2 if the target square is attacked, as there is a chance the piece will be captured)
                 // - Score of the piece before moving
                 // + Score of the captured piece, multiplied by 10 to prioritise captures above all (the king is counted as a "captured" piece with a value of 5000)
-                potentialScore: (CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, board.IsWhiteToMove, isRoughlyEndGame) >> (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 1: 0))
+                (CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, board.IsWhiteToMove, isRoughlyEndGame) / (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 2 : 1))
                     - CalculatePieceScore(move.MovePieceType, move.StartSquare, board.IsWhiteToMove, isRoughlyEndGame)
                     + (move.IsCapture ? (10 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !board.IsWhiteToMove, isRoughlyEndGame)) : (opponentKingSquare == move.TargetSquare ? 50000 : 0))
-                )
             )
-            .OrderByDescending(m => m.potentialScore)
             .ToArray();
 
-        var bestMove = scoredMoves.FirstOrDefault(new ScoredMove());
+        // In case of victory, the score will be higher the faster we achieve it
+        var maxScore = 10000000 - depth;
+
+        var bestScoredMove = new ScoredMove(scoredMoves.FirstOrDefault());
         var numberOfFullyStudiedMoves = 0;
         var timeoutCancellation = timer.MillisecondsElapsedThisTurn >= turnTimeLimit;
 
-        while (numberOfFullyStudiedMoves < scoredMoves.Length && !timeoutCancellation)
+        // For efficiency, we prune branches here. Basically, there is no need to continue with the search on this branch if one of these is true:
+        // * It's been cancelled because of a timeout.
+        // * The ideal move (a checkmate) has already been found at this level of the search tree.
+        // * The best score we have found so far on this branch is too high, as the opponent has already found a move that would give us a lower score.
+        //   Therefore, the scenario we are studying won't ever happen becuse the opponent already knows a way to make us perform worse than here.
+        while (numberOfFullyStudiedMoves < scoredMoves.Length && !timeoutCancellation && bestScoreSoFar < maxScore && bestScoreSoFar < -bestOpponentScoreSoFar)
         {
-            var scoredCandidateMove = scoredMoves[numberOfFullyStudiedMoves];
-            var candidateMove = scoredCandidateMove.move;
+            var candidateMove = scoredMoves[numberOfFullyStudiedMoves];
+            var scoredCandidateMove = new ScoredMove(candidateMove);
             var recaptureDetected = candidateMove.IsCapture && board.SquareIsAttackedByOpponent(candidateMove.TargetSquare);
 
             board.MakeMove(candidateMove);
 
             if (board.IsInCheckmate())
-                scoredCandidateMove.gameScore = 10000000;
+                scoredCandidateMove.gameScore = maxScore;
             else if (board.IsDraw())
                 scoredCandidateMove.gameScore = 0;
             else if (depth < maxDepth || board.IsInCheck() || recaptureDetected)
@@ -396,39 +395,33 @@ public class MyBot : IChessBot
             if (!timeoutCancellation)
             {
                 // This candidate move was fully studied because the search wasn't cancelled, so we need to see if it is actually the new best move
-                if (scoredCandidateMove.gameScore > bestMove.gameScore)
-                    bestScoreSoFar = Math.Max((bestMove = scoredCandidateMove).gameScore, bestScoreSoFar);
+                if (scoredCandidateMove.gameScore > bestScoredMove.gameScore)
+                    bestScoreSoFar = Math.Max((bestScoredMove = scoredCandidateMove).gameScore, bestScoreSoFar);
 
                 // If we have reached the time limit after this iteration without having studied all the possible moves, we must cancel the search
                 timeoutCancellation = ++numberOfFullyStudiedMoves < scoredMoves.Length && timer.MillisecondsElapsedThisTurn >= turnTimeLimit;
             }
-
-            // For efficiency, we prune branches here. Basically, there is no need to continue with the search on this branch if one of these is true:
-            // * The ideal move (a checkmate) has already been found.
-            // * The best score we have found so far on this branch is too high, as the opponent has already found a move that would give us a lower score.
-            //   Therefore, the scenario we are studying won't ever happen becuse the opponent already knows a way to make us perform worse than here.
-            if (bestScoreSoFar == 10000000 || bestScoreSoFar >= -bestOpponentScoreSoFar)
-                break;
         }
 
         if (timeoutCancellation)
             // The search was cancelled, so we just return the best move, indicating whether it is valid or not. For it to be valid,
             // it needs to have been fully studied, meaning that the moves loop completed at least one iteration without cancellations.
-            return (numberOfFullyStudiedMoves > 0 ? 1 : 2, bestMove);
+            return (numberOfFullyStudiedMoves > 0 ? 1 : 2, bestScoredMove);
 
         if (scoredMoves.Length == 0)
             // No legal moves were found, but we still have to return a score for the search to work properly.
             // This might happen when searching for captures only, as the previous move might have left us with no capturing moves here.
-            bestMove.gameScore = CalculateHeuristicScore(board, board.IsWhiteToMove);
+            bestScoredMove.gameScore = CalculateHeuristicScore(board, board.IsWhiteToMove);
         else if (numberOfFullyStudiedMoves == scoredMoves.Length && !onlyCaptures)
+        {
             // We did a full search that studied all the possible moves, both capturing and non-capturing ones, so we store the result in the cache
-            _cachedBestMoves[board.ZobristKey] = (bestMove.gameScore < 10000000 ? searchAccuracy : 100, bestMove);
+            bestScoredMove.gameScoreAccuracy = searchAccuracy;
+            _cachedBestMoves[board.ZobristKey] = bestScoredMove;
+        }
 
-        return (0, bestMove);
+        return (0, bestScoredMove);
     }
 
-    // https://www.chessprogramming.org/PeSTO%27s_Evaluation_Function
-    // https://www.chessprogramming.org/Mobility
     // Calculations:
     // + The total score of all our pieces combined (weighted by game phase)
     // - The total score of all the opponent's pieces combined (weighted by game phase)
@@ -456,14 +449,14 @@ public class MyBot : IChessBot
             gamePhaseWeight += (int)_pieceValues[2 + (19 * (((int)pieceType) - 1))];
         }
 
-        //var basicMovesScore = board.GetLegalMoves().Select(m => m.IsCapture ? 50 : 10).DefaultIfEmpty(0).Sum();
-        //board.ForceSkipTurn();
-        //var basicOpponentMovesScore = board.GetLegalMoves().Select(m => m.IsCapture ? 50 : 10).DefaultIfEmpty(0).Sum();
-        //board.UndoSkipTurn();
+//        var basicMovesScore = board.GetLegalMoves().Select(m => m.IsCapture ? 50 : 10).DefaultIfEmpty(0).Sum();
+//        board.ForceSkipTurn();
+//        var basicOpponentMovesScore = board.GetLegalMoves().Select(m => m.IsCapture ? 50 : 10).DefaultIfEmpty(0).Sum();
+//        board.UndoSkipTurn();
 
         return (middleGameScore * gamePhaseWeight)
             + (endGameScore * (24 - gamePhaseWeight));
-            //+ ((board.IsWhiteToMove == isWhite ? 1 : -1) * (100 + (basicMovesScore - basicOpponentMovesScore)));
+//            + ((board.IsWhiteToMove == isWhite ? 1 : -1) * (100 + (basicMovesScore - basicOpponentMovesScore)));
     }
 
     // Calculations:
