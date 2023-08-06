@@ -8,7 +8,8 @@ public class MyBotTest
     {
         var bot = new MyBot();
         var board = Board.CreateBoardFromFEN("8/7k/5K2/6Q1/8/8/8/8 b - - 0 1");
-        var exepectedMoves = new Move[] {
+        var exepectedMoves = new Move[]
+        {
             new("h7h8", board),
             new("g5g7", board),
         };
@@ -17,7 +18,7 @@ public class MyBotTest
         {
             var move = bot.Think(board, new Timer(30000)); // might need to be bigger in some machines
 
-            Assert.Equal(move.ToString(), exepectedMove.ToString());
+            Assert.Equal(exepectedMove.ToString(), move.ToString());
 
             board.MakeMove(move);
         }
@@ -30,7 +31,8 @@ public class MyBotTest
     {
         var bot = new MyBot();
         var board = Board.CreateBoardFromFEN("kbK5/pp6/1P6/8/8/8/8/R7 w - - 0 1");
-        var exepectedMoves = new Move[] {
+        var exepectedMoves = new Move[]
+        {
             new("a1a6", board),
             new("b7a6", board),
             new("b6b7", board),
@@ -40,7 +42,7 @@ public class MyBotTest
         {
             var move = bot.Think(board, new Timer(60000)); // might need to be bigger in some machines
 
-            Assert.Equal(move.ToString(), exepectedMove.ToString());
+            Assert.Equal(exepectedMove.ToString(), move.ToString());
 
             board.MakeMove(move);
         }
@@ -53,7 +55,8 @@ public class MyBotTest
     {
         var bot = new MyBot();
         var board = Board.CreateBoardFromFEN("1r2r3/1q1n1p1k/p1b1pp2/3pP3/1b6/2N1BBQ1/1PP3PP/3R3K w - - 0 2");
-        var exepectedMoves = new Move[] {
+        var exepectedMoves = new Move[]
+        {
             new("d1d4", board),
             new("b4f8", board),
             new("d4h4", board),
@@ -65,7 +68,7 @@ public class MyBotTest
         {
             var move = bot.Think(board, new Timer(120000)); // might need to be bigger in some machines
 
-            Assert.Equal(move.ToString(), exepectedMove.ToString());
+            Assert.Equal(exepectedMove.ToString(), move.ToString());
 
             board.MakeMove(move);
         }
@@ -77,7 +80,8 @@ public class MyBotTest
     public void TestHeuristicScoresAreSameButInvertedForBothColors()
     {
         var bot = new MyBot();
-        var boards = new[] {
+        var boards = new[]
+        {
             Board.CreateBoardFromFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
             Board.CreateBoardFromFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"),
             Board.CreateBoardFromFEN("1r2r3/1q1n1p1k/p1b1pp2/3pP3/1b6/2N1BBQ1/1PP3PP/3R3K w - - 0 2"),
@@ -337,7 +341,7 @@ public class MyBotTest
                     var square = new Square(fileIndex, 7 - rankIndex);
                     var result = bot.CalculatePieceScore(pieceType, square, isWhite, isEndGame);
 
-                    Assert.Equal(result, expectedResult);
+                    Assert.Equal(expectedResult, result);
                 }
             }
         }
