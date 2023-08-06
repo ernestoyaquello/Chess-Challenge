@@ -279,13 +279,13 @@ public class MyBot : IChessBot
 
     public struct ScoredMove
     {
-        public ScoredMove(Move wrappedMove) => (move, gameScore, gameScoreDepthAccuracy, wasSearchPruned) = (wrappedMove, -10000000, 0, false);
+        public ScoredMove(Move wrappedMove) => move = wrappedMove;
 
         public Move move;
 
-        public int gameScore; // To be set later by the function SearchForBestScoredMove(...)
-        public int gameScoreDepthAccuracy; // To be set later by the function SearchForBestScoredMove(...)
-        public bool wasSearchPruned; // To be set later by the function SearchForBestScoredMove(...)
+        public int searchScore = -10000000; // To be set later by the function SearchForBestScoredMove(...)
+        public int searchAccuracy = 0; // To be set later by the function SearchForBestScoredMove(...)
+        public int searchResultType = 0; // To be set later by the function SearchForBestScoredMove(...)
     }
 
     public Move Think(Board board, Timer timer)
@@ -305,13 +305,15 @@ public class MyBot : IChessBot
             //   better than the current one. This is because there is a chance that the move, despite having been fully
             //   studied, is not actually the best possible one (not all moves are studied in a partially completed search).
             var (searchStatus, newBestScoredMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth);
-            if (searchStatus == 0 || (searchStatus == 1 && newBestScoredMove.gameScore > bestScoredMove.gameScore))
+            if (searchStatus == 0 || (searchStatus == 1 && newBestScoredMove.searchScore > bestScoredMove.searchScore))
 //            {
                 bestScoredMove = newBestScoredMove;
 //                Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth} ({(searchStatus == 0 ? "full search" : "partial search")})");
 //            }
 //            else
+//            {
 //                Console.WriteLine($"Move score = {bestScoredMove.gameScore}\nMax depth  : {maxDepth - 1} (full search; search with max depth {maxDepth} cancelled)");
+//            } 
 
         }
 
@@ -329,20 +331,26 @@ public class MyBot : IChessBot
     //  * 2 = The returned move is not valid and must be discarded, as the search didn't have time to fully study any of the possible moves.
     public (int, ScoredMove) SearchForBestScoredMove(Board board, Timer timer, int turnTimeLimit, int maxDepth, int depth = 1, int bestScoreSoFar = -10000000, int bestOpponentScoreSoFar = -10000000, bool onlyCaptures = false)
     {
-        var searchDepthAccuracy = 1 + Math.Max(0, maxDepth - depth);
+        var searchAccuracy = 1 + Math.Max(0, maxDepth - depth);
 
         if (!onlyCaptures && _cachedBestMoves.TryGetValue(board.ZobristKey, out var cachedScoredMove))
         {
             // If this board state has already come up before and we have cached a move for it with enough accuracy, return that result directly to avoid doing any calculations.
-            // In case the move was found with pruning (which means that it might not be the best possible one), we check if it actually causes pruning here, and if so, we return it.
-            if (cachedScoredMove.gameScoreDepthAccuracy >= searchDepthAccuracy && (!cachedScoredMove.wasSearchPruned || cachedScoredMove.gameScore >= -bestOpponentScoreSoFar))
+            // In case the move score was not exact, but a result of the pruning mechanisms (which means that the move might not be the best possible one for this board state),
+            // we check if the move score actually causes pruning here; and if so, we just return the move as the search result.
+            var searchResultType = cachedScoredMove.searchResultType;
+            if (cachedScoredMove.searchAccuracy >= searchAccuracy &&
+                (searchResultType == 0 ||
+                    (searchResultType == 1 && cachedScoredMove.searchScore >= -bestOpponentScoreSoFar) ||
+                    (searchResultType == 2 && cachedScoredMove.searchScore <= bestScoreSoFar)))
                 return (0, cachedScoredMove);
         }
         else cachedScoredMove = default;
 
         // Get moves sorted by their potential score to make sure we prune bad branches as early as possible
+        var isWhite = board.IsWhiteToMove;
         var isRoughlyEndGame = BitboardHelper.GetNumberOfSetBits(board.AllPiecesBitboard) <= 12;
-        var opponentKingSquare = board.GetKingSquare(!board.IsWhiteToMove);
+        var opponentKingSquare = board.GetKingSquare(!isWhite);
         var sortedMoves = board
             .GetLegalMoves(onlyCaptures)
             .OrderByDescending(move =>
@@ -354,9 +362,9 @@ public class MyBot : IChessBot
                 // + Score of the piece after moving (divided by 2 if the target square is attacked, as there is a chance the piece will be captured)
                 // - Score of the piece before moving
                 // + Score of the captured piece, multiplied by 10 to prioritise captures above all (the king is counted as a "captured" piece with a value of 5000)
-                : ((CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, board.IsWhiteToMove, isRoughlyEndGame) / (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 2 : 1))
-                    - CalculatePieceScore(move.MovePieceType, move.StartSquare, board.IsWhiteToMove, isRoughlyEndGame)
-                    + (move.IsCapture ? (10 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !board.IsWhiteToMove, isRoughlyEndGame)) : (opponentKingSquare == move.TargetSquare ? 50000 : 0)))
+                : ((CalculatePieceScore(move.IsPromotion ? move.PromotionPieceType : move.MovePieceType, move.TargetSquare, isWhite, isRoughlyEndGame) / (board.SquareIsAttackedByOpponent(move.TargetSquare) ? 2 : 1))
+                    - CalculatePieceScore(move.MovePieceType, move.StartSquare, isWhite, isRoughlyEndGame)
+                    + (move.IsCapture ? (10 * CalculatePieceScore(move.CapturePieceType, move.TargetSquare, !isWhite, isRoughlyEndGame)) : (opponentKingSquare == move.TargetSquare ? 50000 : 0)))
             )
             .ToArray();
 
@@ -377,9 +385,9 @@ public class MyBot : IChessBot
             board.MakeMove(candidateMove);
 
             if (board.IsInCheckmate())
-                scoredCandidateMove.gameScore = immediateCheckmateScore;
-            else if ((depth > 1 && board.IsRepeatedPosition()) || board.IsDraw())
-                scoredCandidateMove.gameScore = 0;
+                scoredCandidateMove.searchScore = immediateCheckmateScore;
+            else if (board.IsRepeatedPosition() || board.IsDraw())
+                scoredCandidateMove.searchScore = 0;
             else if (depth < maxDepth || board.IsInCheck() || recaptureDetected)
             {
                 // We keep searching down the tree because either of these was true:
@@ -389,12 +397,12 @@ public class MyBot : IChessBot
                 var (searchStatus, opponentBestMove) = SearchForBestScoredMove(board, timer, turnTimeLimit, maxDepth, depth + 1, bestOpponentScoreSoFar, bestScoreSoFar, depth >= maxDepth && !board.IsInCheck());
 
                 // We take the negative of the score obtained by the lower node as the score for this move because what's good for the opponent is bad for us
-                scoredCandidateMove.gameScore = -opponentBestMove.gameScore;
+                scoredCandidateMove.searchScore = -opponentBestMove.searchScore;
                 timeoutCancellation = searchStatus != 0;
             }
             else
                 // We cannot search further down the tree, time to calculate the score with heuristics
-                scoredCandidateMove.gameScore = CalculateHeuristicScore(board, !board.IsWhiteToMove);
+                scoredCandidateMove.searchScore = CalculateHeuristicScore(board, isWhite);
 
             board.UndoMove(candidateMove);
 
@@ -403,9 +411,9 @@ public class MyBot : IChessBot
                 numberOfFullyStudiedMoves++;
 
                 // This candidate move was fully studied because the search didn't time out, so we need to see if it is actually the new best move
-                if (scoredCandidateMove.gameScore > bestScoredMove.gameScore)
+                if (scoredCandidateMove.searchScore > bestScoredMove.searchScore)
                 {
-                    bestScoreSoFar = Math.Max((bestScoredMove = scoredCandidateMove).gameScore, bestScoreSoFar);
+                    bestScoreSoFar = Math.Max((bestScoredMove = scoredCandidateMove).searchScore, bestScoreSoFar);
 
                     // For efficiency, we prune branches here. Basically, there is no need to continue with the search on this branch if either of these is true:
                     // * The ideal move (a checkmate) has already been found at this level of the search tree.
@@ -423,14 +431,15 @@ public class MyBot : IChessBot
         if (sortedMoves.Length == 0)
             // No legal moves were found, but we still have to return a score for the search to work properly.
             // This might happen when searching for captures only, as the previous move might have left us with no capturing moves available here.
-            bestScoredMove.gameScore = CalculateHeuristicScore(board, board.IsWhiteToMove);
+            bestScoredMove.searchScore = CalculateHeuristicScore(board, isWhite);
         else if (searchCompletionState == 0 && !onlyCaptures)
         {
-            // The search finished without timeouts, so we save the result on the cache, noting whether or not there was pruning caused by the score being to high.
-            // Note that if the score was actually high enough to represent an immediate checkmate, then we consider that no pruning happened, as the best move we
-            // found (one that causes a checkmate) is definitely the best possible one regardless of whether we studied all the possible moves or not.
-            bestScoredMove.wasSearchPruned = numberOfFullyStudiedMoves < sortedMoves.Length && bestScoreSoFar < immediateCheckmateScore;
-            bestScoredMove.gameScoreDepthAccuracy = searchDepthAccuracy;
+            // The search finished without timeouts, so we save the result on the cache, noting its type:
+            //  * 1 if the score was too high (i.e., higher than the negative of the opponent, meaning that the opponent would never allow us to get here).
+            //  * 2 if the score was too low (i.e., lower than the best score found so far, meaning we would never choose this branch).
+            //  * 0 if the score was neither too high nor too low because it was within range.
+            bestScoredMove.searchResultType = bestScoreSoFar >= -bestOpponentScoreSoFar ? 1 : (bestScoredMove.searchScore <= bestScoreSoFar ? 2 : 0);
+            bestScoredMove.searchAccuracy = searchAccuracy;
             _cachedBestMoves[board.ZobristKey] = bestScoredMove;
         }
 
@@ -440,10 +449,6 @@ public class MyBot : IChessBot
     // Calculations:
     // + The total score of all our pieces combined (weighted by game phase)
     // - The total score of all the opponent's pieces combined (weighted by game phase)
-    // + Mobilty score (NOTE: This is not actually being added to the score for now):
-    //    +/- 100 as a bonus for having the right to move
-    //    +/- 10 * (non-capturing moves available to the player with the right to move - non-capturing moves available to the idle player)
-    //    +/- 50 * (capturing moves available to the player with the right to move - capturing moves available to the idle player)
     public int CalculateHeuristicScore(Board board, bool isWhite)
     {
         int middleGameScore = 0,
@@ -465,14 +470,7 @@ public class MyBot : IChessBot
             gamePhaseWeight += (int)_pieceValues[2 + (19 * (((int)pieceType) - 1))];
         }
 
-//        var basicMovesScore = board.GetLegalMoves().Select(m => m.IsCapture ? 50 : 10).DefaultIfEmpty(0).Sum();
-//        board.ForceSkipTurn();
-//        var basicOpponentMovesScore = board.GetLegalMoves().Select(m => m.IsCapture ? 50 : 10).DefaultIfEmpty(0).Sum();
-//        board.UndoSkipTurn();
-
-        return (middleGameScore * gamePhaseWeight)
-            + (endGameScore * (24 - gamePhaseWeight));
-//            + ((board.IsWhiteToMove == isWhite ? 1 : -1) * (100 + (basicMovesScore - basicOpponentMovesScore)));
+        return (middleGameScore * gamePhaseWeight) + (endGameScore * (24 - gamePhaseWeight));
     }
 
     // Calculations:
